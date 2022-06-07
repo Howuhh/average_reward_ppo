@@ -15,7 +15,7 @@ def init_linear(
         linear: torch.nn.Linear,
         std: float = math.sqrt(2),
         bias: float = 0.0
-    ) -> torch.nn.Linear:
+) -> torch.nn.Linear:
     torch.nn.init.orthogonal_(linear.weight, std)
     torch.nn.init.constant_(linear.bias, bias)
     return linear
@@ -99,7 +99,7 @@ class RunningMeanStd(nn.Module):
         return new_mean, new_var, new_count
 
 
-def rollout(env, agent, greedy=False, device="cpu"):
+def rollout(env, agent, greedy: bool = False, device: str = "cpu"):
     total_reward, total_steps = 0.0, 0.0
     state, done = env.reset(), [False]
     while not done[0]:

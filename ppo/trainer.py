@@ -35,8 +35,10 @@ class PPOTrainer:
             device="cpu"
     ):
         # Make it as factory
-        self.train_env = make_vec_env(env_name, num_envs=num_envs, normalize_reward=True)
-        self.eval_env = make_vec_env(env_name, num_envs=1)
+        self.train_env_f = lambda seed: make_vec_env(env_name, num_envs, normalize_reward=True, seed=seed)
+        self.eval_env_f = lambda seed: make_vec_env(env_name, num_envs=1, seed=seed)
+        # self.train_env = make_vec_env(env_name, num_envs=num_envs, normalize_reward=True)
+        # self.eval_env = make_vec_env(env_name, num_envs=1)
 
         self.learning_rate = learning_rate
         self.decay_lr = linear_decay_lr
@@ -168,19 +170,22 @@ class PPOTrainer:
 
     @torch.no_grad()
     def evaluate(self, agent, num_evals, seed):
-        set_seed(seed, env=self.eval_env)
+        set_seed(seed)
+        eval_env = self.eval_env_f(seed=seed)
 
         returns, lens = [], []
         for _ in trange(num_evals, desc="Evaluation", leave=False):
-            ep_return, ep_len = rollout(self.eval_env, agent, greedy=True, device=self.device)
+            ep_return, ep_len = rollout(eval_env, agent, greedy=True, device=self.device)
             returns.append(ep_return)
             lens.append(ep_len)
 
         return np.array(returns), np.array(lens)
 
     def train(self, agent, total_steps, eval_every=10, num_evals=10, seed=42, eval_seed=42):
-        set_seed(seed, env=self.train_env)
+        set_seed(seed)
         self._reset_rates()
+
+        train_env = self.train_env_f(seed=seed)
 
         num_steps, num_envs, device = self.num_steps, self.num_envs, self.device
         num_updates = round(total_steps / (num_envs * num_steps))
@@ -189,14 +194,14 @@ class PPOTrainer:
         scheduler = torch.optim.lr_scheduler.LinearLR(optim, start_factor=1.0, end_factor=0.0, total_iters=num_updates)
 
         # buffers for on-policy data from vec envs
-        states = torch.zeros((num_steps, num_envs) + self.train_env.single_observation_space.shape, dtype=torch.float, device=device)
-        actions = torch.zeros((num_steps, num_envs) + self.train_env.single_action_space.shape, dtype=torch.float, device=device)
+        states = torch.zeros((num_steps, num_envs) + train_env.single_observation_space.shape, dtype=torch.float, device=device)
+        actions = torch.zeros((num_steps, num_envs) + train_env.single_action_space.shape, dtype=torch.float, device=device)
         rewards = torch.zeros(num_steps, num_envs, device=device)
         dones = torch.zeros(num_steps, num_envs, device=device)
         log_probs = torch.zeros(num_steps, num_envs, device=device)
         values = torch.zeros(num_steps + 1, num_envs, device=device)
 
-        state = torch.tensor(self.train_env.reset(), dtype=torch.float, device=device)
+        state = torch.tensor(train_env.reset(), dtype=torch.float, device=device)
         for update in trange(num_updates):
             agent.train()
             # gather batch of on-policy experience from vectorized environment
@@ -206,7 +211,7 @@ class PPOTrainer:
                     agent.update_state_rms(state)
 
                     action, (log_prob, entropy) = agent.get_action(state)
-                    next_state, reward, done, info = self.train_env.step(action.cpu().numpy())
+                    next_state, reward, done, info = train_env.step(action.cpu().numpy())
 
                     states[step] = state
                     actions[step] = action
@@ -221,7 +226,7 @@ class PPOTrainer:
                 with torch.no_grad():
                     values[-1] = agent.get_value(state).squeeze()
 
-            # compute returns from rollout data, then flatten data
+            # compute returns and advantages from rollout data
             # returns = average_n_step_returns(
             returns = average_gae_returns(
                 rewards, values, dones,
@@ -237,10 +242,10 @@ class PPOTrainer:
             # update networks for number of epochs
             update_info = self._update(agent, optim, scheduler, states, actions, log_probs, returns, advantages)
 
-            total_transitions = update * (num_envs * num_steps)
+            total_transitions = (update + 1) * (num_envs * num_steps)
             wandb.log({
                 "step": total_transitions,
-                "train/lr": scheduler.get_lr(),
+                "train/lr": scheduler.get_last_lr()[0],
                 "train/value_rate": self._value_rate,
                 "train/reward_rate": self._reward_rate,
                 **{f"train/{k}": v for k, v in update_info.items()}
@@ -250,19 +255,20 @@ class PPOTrainer:
             if update % eval_every == 0 or update == num_updates - 1:
                 agent.eval()
                 eval_returns, eval_lens = self.evaluate(agent, num_evals=num_evals, seed=eval_seed)
+                wandb.log({
+                    "eval/reward_mean": eval_returns.mean(),
+                    "eval/reward_std": eval_returns.std(),
+                    "step": total_transitions
+                })
+                # print out some metrics for debugging
                 tqdm.write(
                     f"STEPS: {total_transitions} "
-                    f"LR: {scheduler.get_lr()[0]:.8f} "
+                    f"LR: {scheduler.get_last_lr()[0]:.8f} "
                     f"Actor loss: {update_info['actor_loss_epoch']:.3f} "
                     f"Critic_loss: {update_info['critic_loss_epoch']:.3f} "
                     f"Entropy loss: {update_info['entropy_loss_epoch']:.3f} "
                     f"KL div: {update_info['kl_div_epoch']:.3f} "
                     f"MEAN REWARD: {np.mean(eval_returns):.3f} "
                 )
-                wandb.log({
-                    "eval/reward_mean": eval_returns.mean(),
-                    "eval/reward_std": eval_returns.std(),
-                    "step": total_transitions
-                })
 
         return agent
