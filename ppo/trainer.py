@@ -14,25 +14,25 @@ from ppo.returns import average_n_step_returns, average_gae_returns
 class PPOTrainer:
     def __init__(
             self,
-            env_name,
-            num_envs=2,
-            reward_tau=0.1,
-            value_tau=0.001,
-            value_constraint=0.0,
-            norm_adv=True,
-            clip_eps=0.2,
-            num_epochs=10,
-            num_steps=2048,
-            batch_size=64,
-            gae_lambda=0.95,
-            value_loss_coef=0.5,
-            entropy_loss_coef=0.0,
-            learning_rate=3e-4,
-            linear_decay_lr=True,
-            adam_eps=1e-5,
-            clip_grad=0.5,
-            target_kl=None,
-            device="cpu"
+            env_name: str,
+            num_envs: int = 2,
+            reward_tau: float = 0.1,
+            value_tau: float = 0.001,
+            value_constraint: float = 0.0,
+            norm_adv: bool = True,
+            clip_eps: float = 0.2,
+            num_epochs: int = 10,
+            num_steps: int = 2048,
+            batch_size: int = 64,
+            gae_lambda: float = 0.95,
+            value_loss_coef: float = 0.5,
+            entropy_loss_coef:float = 0.0,
+            learning_rate: float = 3e-4,
+            linear_decay_lr: float = True,
+            adam_eps: float = 1e-5, 
+            clip_grad: float = 0.5,
+            target_kl: float = None,
+            device: str = "cpu"
     ):
         # Make it as factory
         self.train_env_f = lambda seed: make_vec_env(env_name, num_envs, normalize_reward=True, seed=seed)
@@ -218,6 +218,7 @@ class PPOTrainer:
                     log_probs[step] = log_prob
                     rewards[step] = torch.tensor(reward, dtype=torch.float, device=device)
                     values[step] = agent.get_value(state).squeeze()
+                    # TODO: handle timeout's as not real dones
                     dones[step] = torch.tensor(done, device=device)
 
                     state = torch.tensor(next_state, dtype=torch.float, device=device)
@@ -253,11 +254,14 @@ class PPOTrainer:
 
             # evaluate agent
             if update % eval_every == 0 or update == num_updates - 1:
+                # TODO: add checkpoints saving
                 agent.eval()
                 eval_returns, eval_lens = self.evaluate(agent, num_evals=num_evals, seed=eval_seed)
                 wandb.log({
                     "eval/reward_mean": eval_returns.mean(),
                     "eval/reward_std": eval_returns.std(),
+                    "eval/reward_rate_mean": (eval_returns / eval_lens).mean(),
+                    "eval/reward_rate_std": (eval_returns / eval_lens).std(),
                     "step": total_transitions
                 })
                 # print out some metrics for debugging

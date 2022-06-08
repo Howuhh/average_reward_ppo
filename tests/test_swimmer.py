@@ -32,7 +32,9 @@ class TestSwimmerV3(unittest.TestCase):
         self.trainer.train(
             agent=self.agent,
             total_steps=1_000_000,
-            eval_every=10
+            eval_every=10,
+            seed=42, 
+            eval_seed=42
         )
         returns, lens = self.trainer.evaluate(self.agent, 10, seed=42)
 

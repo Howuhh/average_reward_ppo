@@ -16,7 +16,7 @@ def create_argparser():
     parser.add_argument("--group", type=str, default="APO")
     parser.add_argument("--name", type=str, default="apo")
     # gym configuration
-    parser.add_argument("--env_name", type=str, default="Swimmer-v4")
+    parser.add_argument("--env_name", type=str, default="Swimmer-v3")
     parser.add_argument("--num_envs", type=int, default=64)
     # ppo configuration
     parser.add_argument("--num_steps", type=int, default=256)
@@ -35,8 +35,8 @@ def create_argparser():
     parser.add_argument("--hidden_dim", type=int, default=64)
     parser.add_argument('--eval_every', type=int, default=5)
 
-    parser.add_argument("--train_seed", type=str, default=42)
-    parser.add_argument("--eval_seed", type=str, default=10)
+    parser.add_argument("--train_seed", type=int, default=42)
+    parser.add_argument("--eval_seed", type=int, default=10)
     parser.add_argument("--device", type=str, default="cpu")
 
     return parser
@@ -44,6 +44,11 @@ def create_argparser():
 
 def run_experiment(config):
     set_seed(config.train_seed)
+
+    tmp_env = gym.make(config.env_name)
+    config.state_dim = tmp_env.observation_space.shape[0]
+    config.action_dim = tmp_env.action_space.shape[0]
+
     run = wandb.init(
         project=config.project,
         entity=config.entity,
@@ -52,10 +57,9 @@ def run_experiment(config):
         config=config, reinit=True
     )
 
-    tmp_env = gym.make(config.env_name)
     agent = Agent(
-        state_dim=tmp_env.observation_space.shape[0],
-        action_dim=tmp_env.action_space.shape[0],
+        state_dim=config.state_dim,
+        action_dim=config.action_dim,
         hidden_dim=config.hidden_dim
     ).to(config.device)
 
