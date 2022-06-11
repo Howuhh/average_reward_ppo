@@ -1,6 +1,7 @@
 import os
 import gym
 import math
+import wandb
 import torch
 import random
 
@@ -37,9 +38,10 @@ def make_vec_env(
         env_name: str,
         num_envs: int = 4,
         normalize_reward: bool = False,
-        seed: Optional[float] = None
+        seed: Optional[float] = None,
 ):
-    vec_env = envpool.make(env_name, env_type="gym", num_envs=num_envs, seed=seed)
+    # frame_skip is not needed for mujoco envs, so I will set it to 1 (while default is not)
+    vec_env = envpool.make(env_name, env_type="gym", num_envs=num_envs, seed=seed, frame_skip=1)
     vec_env.num_envs = num_envs
     vec_env.is_vector_env = True
     vec_env.single_action_space = vec_env.action_space
@@ -112,3 +114,15 @@ def rollout(env, agent, greedy: bool = False, device: str = "cpu"):
         total_steps += 1
 
     return total_reward, total_steps
+
+
+# just simple wrapper for convenience
+class WandbLogger:
+    def __init__(self, **wandb_kwargs):
+        self.run = wandb.init(**wandb_kwargs, reinit=True)
+
+    def log(self, info_dict):
+        wandb.log(info_dict)
+
+    def finish(self):
+        self.run.finish()

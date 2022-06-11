@@ -3,7 +3,7 @@ import wandb
 import argparse
 
 from ppo.agent import Agent
-from ppo.utils import set_seed
+from ppo.utils import set_seed, WandbLogger
 from ppo.trainer import PPOTrainer
 from distutils.util import strtobool
 
@@ -23,7 +23,7 @@ def create_argparser():
     parser.add_argument("--num_epochs", type=int, default=15)
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--lr_decay", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True)
+    parser.add_argument("--lr_decay", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True)
     parser.add_argument("--ent_loss_coef", type=float, default=0.0)
     parser.add_argument("--value_loss_coef", type=float, default=0.5)
     parser.add_argument("--tau", type=float, default=0.1)
@@ -49,12 +49,12 @@ def run_experiment(config):
     config.state_dim = tmp_env.observation_space.shape[0]
     config.action_dim = tmp_env.action_space.shape[0]
 
-    run = wandb.init(
+    logger = WandbLogger(
         project=config.project,
         entity=config.entity,
         group=f"{config.group}_{config.env_name}",
         name=f"{config.name}_{config.env_name}_{config.train_seed}",
-        config=config, reinit=True
+        config=config
     )
 
     agent = Agent(
@@ -83,13 +83,12 @@ def run_experiment(config):
     )
     trainer.train(
         agent=agent,
+        logger=logger,
         total_steps=config.train_steps,
         eval_every=config.eval_every,
         seed=config.train_seed,
         eval_seed=config.eval_seed
     )
-
-    run.finish()
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from tqdm.auto import tqdm, trange
 
 from ppo.utils import make_vec_env, set_seed, rollout
-from ppo.returns import average_n_step_returns, average_gae_returns
+from ppo.returns import average_gae_returns
 
 
 class PPOTrainer:
@@ -25,10 +25,10 @@ class PPOTrainer:
             num_steps: int = 2048,
             batch_size: int = 64,
             gae_lambda: float = 0.95,
-            value_loss_coef: float = 0.5,
-            entropy_loss_coef:float = 0.0,
+            value_loss_coef: float = 0.25,
+            entropy_loss_coef: float = 0.0,
             learning_rate: float = 3e-4,
-            linear_decay_lr: float = True,
+            linear_decay_lr: float = False,
             adam_eps: float = 1e-5, 
             clip_grad: float = 0.5,
             target_kl: float = None,
@@ -37,8 +37,6 @@ class PPOTrainer:
         # Make it as factory
         self.train_env_f = lambda seed: make_vec_env(env_name, num_envs, normalize_reward=True, seed=seed)
         self.eval_env_f = lambda seed: make_vec_env(env_name, num_envs=1, seed=seed)
-        # self.train_env = make_vec_env(env_name, num_envs=num_envs, normalize_reward=True)
-        # self.eval_env = make_vec_env(env_name, num_envs=1)
 
         self.learning_rate = learning_rate
         self.decay_lr = linear_decay_lr
@@ -93,17 +91,12 @@ class PPOTrainer:
     def _critic_loss(self, agent, states, target_returns):
         values = agent.get_value(states).view(-1)
 
-        # update value rate estimate
-        mean_value = values.mean()
-        self._value_rate = (1 - self.value_tau) * self._value_rate + self.value_tau * mean_value.item()
-
         assert values.shape == target_returns.shape
-        with torch.no_grad():
-            target_returns = target_returns - self.value_constraint * self._value_rate
+        target_returns = target_returns - self.value_constraint * self._value_rate
 
-        critic_loss = F.mse_loss(values, target_returns)
+        critic_loss = F.mse_loss(values, target_returns.detach())
 
-        return critic_loss, mean_value
+        return critic_loss
 
     def _update(self, agent, optimizer, scheduler, states, actions, log_probs, returns, advantages):
         states = states.flatten(0, 1)
@@ -112,7 +105,7 @@ class PPOTrainer:
         returns = returns.flatten()
         advantages = advantages.flatten()
 
-        actor_loss_epoch, critic_loss_epoch, entropy_loss_epoch, mean_value_epoch = 0, 0, 0, 0
+        actor_loss_epoch, critic_loss_epoch, entropy_loss_epoch = 0, 0, 0
         kl_divs_epoch = 0.0
 
         kl_div_check = True
@@ -129,7 +122,7 @@ class PPOTrainer:
                     log_probs[batch_idxs],
                     advantages[batch_idxs]
                 )
-                critic_loss, mean_value = self._critic_loss(agent, states[batch_idxs], returns[batch_idxs])
+                critic_loss = self._critic_loss(agent, states[batch_idxs], returns[batch_idxs])
 
                 loss = actor_loss + self.value_loss_coef * critic_loss - self.entropy_loss_coef * entropy_loss
 
@@ -151,7 +144,6 @@ class PPOTrainer:
                 actor_loss_epoch += actor_loss.item()
                 critic_loss_epoch += critic_loss.item()
                 entropy_loss_epoch += entropy_loss.item()
-                mean_value_epoch += mean_value.item()
 
             if not kl_div_check:
                 break
@@ -164,8 +156,7 @@ class PPOTrainer:
             "actor_loss_epoch": actor_loss_epoch / total_updates,
             "critic_loss_epoch": critic_loss_epoch / total_updates,
             "entropy_loss_epoch": entropy_loss_epoch / total_updates,
-            "kl_div_epoch": kl_divs_epoch / total_updates,
-            "mean_value_epoch": mean_value_epoch / total_updates,
+            "kl_div_epoch": kl_divs_epoch / total_updates
         }
 
     @torch.no_grad()
@@ -181,7 +172,7 @@ class PPOTrainer:
 
         return np.array(returns), np.array(lens)
 
-    def train(self, agent, total_steps, eval_every=10, num_evals=10, seed=42, eval_seed=42):
+    def train(self, agent, total_steps, eval_every=10, num_evals=10, seed=42, eval_seed=42, logger=None):
         set_seed(seed)
         self._reset_rates()
 
@@ -213,12 +204,14 @@ class PPOTrainer:
                     action, (log_prob, entropy) = agent.get_action(state)
                     next_state, reward, done, info = train_env.step(action.cpu().numpy())
 
+                    # reward = reward - self.entropy_loss_coef * entropy.cpu().numpy()
+                    # real_done = done & ~info["TimeLimit.truncated"]
+
                     states[step] = state
                     actions[step] = action
                     log_probs[step] = log_prob
                     rewards[step] = torch.tensor(reward, dtype=torch.float, device=device)
                     values[step] = agent.get_value(state).squeeze()
-                    # TODO: handle timeout's as not real dones
                     dones[step] = torch.tensor(done, device=device)
 
                     state = torch.tensor(next_state, dtype=torch.float, device=device)
@@ -228,7 +221,6 @@ class PPOTrainer:
                     values[-1] = agent.get_value(state).squeeze()
 
             # compute returns and advantages from rollout data
-            # returns = average_n_step_returns(
             returns = average_gae_returns(
                 rewards, values, dones,
                 reward_rate=self._reward_rate,
@@ -238,32 +230,37 @@ class PPOTrainer:
 
             # update on-policy reward rate estimate
             with torch.no_grad():
-                self._reward_rate = (1 - self.reward_tau) * self._reward_rate + self.reward_tau * rewards.mean(1).mean(0).item()
+                self._reward_rate = (1 - self.reward_tau) * self._reward_rate + self.reward_tau * rewards.mean().item()
+                mean_batch_value = values.mean().item()  # needed for logging
+                self._value_rate = (1 - self.value_tau) * self._value_rate + self.value_tau * mean_batch_value
 
             # update networks for number of epochs
             update_info = self._update(agent, optim, scheduler, states, actions, log_probs, returns, advantages)
 
             total_transitions = (update + 1) * (num_envs * num_steps)
-            wandb.log({
-                "step": total_transitions,
-                "train/lr": scheduler.get_last_lr()[0],
-                "train/value_rate": self._value_rate,
-                "train/reward_rate": self._reward_rate,
-                **{f"train/{k}": v for k, v in update_info.items()}
-            })
+            if logger is not None:
+                logger.log({
+                    "step": total_transitions,
+                    "train/lr": scheduler.get_last_lr()[0],
+                    "train/value_rate": self._value_rate,
+                    "train/reward_rate": self._reward_rate,
+                    "train/mean_value": mean_batch_value,
+                    **{f"train/{k}": v for k, v in update_info.items()}
+                })
 
             # evaluate agent
             if update % eval_every == 0 or update == num_updates - 1:
-                # TODO: add checkpoints saving
                 agent.eval()
                 eval_returns, eval_lens = self.evaluate(agent, num_evals=num_evals, seed=eval_seed)
-                wandb.log({
-                    "eval/reward_mean": eval_returns.mean(),
-                    "eval/reward_std": eval_returns.std(),
-                    "eval/reward_rate_mean": (eval_returns / eval_lens).mean(),
-                    "eval/reward_rate_std": (eval_returns / eval_lens).std(),
-                    "step": total_transitions
-                })
+                if logger is not None:
+                    logger.log({
+                        "eval/reward_mean": eval_returns.mean(),
+                        "eval/reward_std": eval_returns.std(),
+                        "eval/reward_rate_mean": (eval_returns / eval_lens).mean(),
+                        "eval/reward_rate_std": (eval_returns / eval_lens).std(),
+                        "step": total_transitions
+                    })
+
                 # print out some metrics for debugging
                 tqdm.write(
                     f"STEPS: {total_transitions} "
@@ -274,5 +271,8 @@ class PPOTrainer:
                     f"KL div: {update_info['kl_div_epoch']:.3f} "
                     f"MEAN REWARD: {np.mean(eval_returns):.3f} "
                 )
+
+        if logger is not None:
+            logger.finish()
 
         return agent

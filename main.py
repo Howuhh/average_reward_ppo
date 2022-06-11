@@ -1,12 +1,12 @@
 import wandb
 
 from ppo.agent import Agent
-from ppo.utils import set_seed
+from ppo.utils import set_seed, WandbLogger
 from ppo.trainer import PPOTrainer
 
 
 def main():
-    wandb.init(
+    logger = WandbLogger(
         project="PPO",
         entity="Howuhh",
         group="cheetah_average",
@@ -37,6 +37,7 @@ def main():
     )
     trainer.train(
         agent=agent,
+        logger=logger,
         total_steps=1_000_000,
         eval_every=5
     )
