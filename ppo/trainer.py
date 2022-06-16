@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 from tqdm.auto import tqdm, trange
 
-from ppo.utils import make_vec_env, set_seed, rollout
+from ppo.utils import make_vec_env_envpool, make_vec_env_gym, set_seed, rollout
 from ppo.returns import average_gae_returns
 
 
@@ -35,8 +35,8 @@ class PPOTrainer:
             device: str = "cpu"
     ):
         # Make it as factory
-        self.train_env_f = lambda seed: make_vec_env(env_name, num_envs, normalize_reward=True, seed=seed)
-        self.eval_env_f = lambda seed: make_vec_env(env_name, num_envs=1, seed=seed)
+        self.train_env_f = lambda seed: make_vec_env_gym(env_name, num_envs, normalize_reward=True, seed=seed)
+        self.eval_env_f = lambda seed: make_vec_env_gym(env_name, num_envs=1, seed=seed)
 
         self.learning_rate = learning_rate
         self.decay_lr = linear_decay_lr
@@ -173,10 +173,10 @@ class PPOTrainer:
         return np.array(returns), np.array(lens)
 
     def train(self, agent, total_steps, eval_every=10, num_evals=10, seed=42, eval_seed=42, logger=None):
-        set_seed(seed)
         self._reset_rates()
 
         train_env = self.train_env_f(seed=seed)
+        set_seed(seed)
 
         num_steps, num_envs, device = self.num_steps, self.num_envs, self.device
         num_updates = round(total_steps / (num_envs * num_steps))
@@ -195,6 +195,7 @@ class PPOTrainer:
         state = torch.tensor(train_env.reset(), dtype=torch.float, device=device)
         for update in trange(num_updates):
             agent.train()
+            terminal_bonus = torch.zeros(num_steps, num_envs, device=device)
             # gather batch of on-policy experience from vectorized environment
             for step in trange(num_steps, leave=False, desc="Env step"):
                 with torch.no_grad():
@@ -204,8 +205,8 @@ class PPOTrainer:
                     action, (log_prob, entropy) = agent.get_action(state)
                     next_state, reward, done, info = train_env.step(action.cpu().numpy())
 
-                    # reward = reward - self.entropy_loss_coef * entropy.cpu().numpy()
-                    # real_done = done & ~info["TimeLimit.truncated"]
+                    assert reward.shape == entropy.cpu().numpy().shape
+                    reward = reward - self.entropy_loss_coef * entropy.cpu().numpy()
 
                     states[step] = state
                     actions[step] = action
@@ -214,25 +215,32 @@ class PPOTrainer:
                     values[step] = agent.get_value(state).squeeze()
                     dones[step] = torch.tensor(done, device=device)
 
+                    # correct handling of timeouts, as they are not real dones and we should still bootstrap
+                    for env_id, done_ in enumerate(done):
+                        # if done_ and info["TimeLimit.truncated"][env_id]:
+                        if done_ and info[env_id].get("TimeLimit.truncated", False):
+                            # terminal_state = torch.tensor(next_state[env_id], dtype=torch.float, device=device)
+                            terminal_state = torch.tensor(info[env_id]["terminal_observation"], dtype=torch.float, device=device)
+                            terminal_bonus[step, env_id] = agent.get_value(terminal_state).item()
+
                     state = torch.tensor(next_state, dtype=torch.float, device=device)
             else:
                 # this is value estimate of the trajectory after num_steps
                 with torch.no_grad():
                     values[-1] = agent.get_value(state).squeeze()
 
+            # update on-policy reward and value rate estimate
+            self._reward_rate = (1 - self.reward_tau) * self._reward_rate + self.reward_tau * rewards.mean().item()
+            mean_batch_value = values.mean().item()  # needed for logging
+            self._value_rate = (1 - self.value_tau) * self._value_rate + self.value_tau * mean_batch_value
+
             # compute returns and advantages from rollout data
             returns = average_gae_returns(
-                rewards, values, dones,
+                rewards + terminal_bonus, values, dones,
                 reward_rate=self._reward_rate,
                 gae_lambda=self.gae_lambda
             )
             advantages = returns - values[:-1]
-
-            # update on-policy reward rate estimate
-            with torch.no_grad():
-                self._reward_rate = (1 - self.reward_tau) * self._reward_rate + self.reward_tau * rewards.mean().item()
-                mean_batch_value = values.mean().item()  # needed for logging
-                self._value_rate = (1 - self.value_tau) * self._value_rate + self.value_tau * mean_batch_value
 
             # update networks for number of epochs
             update_info = self._update(agent, optim, scheduler, states, actions, log_probs, returns, advantages)

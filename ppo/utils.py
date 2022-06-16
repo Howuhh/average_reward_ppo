@@ -10,6 +10,8 @@ import numpy as np
 import torch.nn as nn
 
 from typing import Optional
+# this is only for testing, as gym=0.21 does not have terminal_obs in the vec env info
+from stable_baselines3.common.vec_env import DummyVecEnv
 
 
 def init_linear(
@@ -34,14 +36,39 @@ def set_seed(seed: int, env: Optional[gym.Env] = None):
     # torch.use_deterministic_algorithms(True)
 
 
-def make_vec_env(
+def make_vec_env_gym(
         env_name: str,
         num_envs: int = 4,
         normalize_reward: bool = False,
-        seed: Optional[float] = None,
+        seed: float = 42
 ):
-    # frame_skip is not needed for mujoco envs, so I will set it to 1 (while default is not)
-    vec_env = envpool.make(env_name, env_type="gym", num_envs=num_envs, seed=seed, frame_skip=1)
+    def make_env():
+        env = gym.make(env_name)
+        env = gym.wrappers.RecordEpisodeStatistics(env)
+        if normalize_reward:
+            env = gym.wrappers.NormalizeReward(env, gamma=1.0)
+            env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
+        env = gym.wrappers.ClipAction(env)
+        return env
+
+    # vec_env = gym.vector.SyncVectorEnv([make_env for _ in range(num_envs)])
+    vec_env = DummyVecEnv([make_env for _ in range(num_envs)])
+    vec_env.is_vector_env = True
+    vec_env.single_action_space = vec_env.action_space
+    vec_env.single_observation_space = vec_env.observation_space
+
+    vec_env.seed(seed)
+
+    return vec_env
+
+
+def make_vec_env_envpool(
+        env_name: str,
+        num_envs: int = 4,
+        normalize_reward: bool = False,
+        seed: float = 42,
+):
+    vec_env = envpool.make(env_name, env_type="gym", num_envs=num_envs, seed=seed)
     vec_env.num_envs = num_envs
     vec_env.is_vector_env = True
     vec_env.single_action_space = vec_env.action_space
