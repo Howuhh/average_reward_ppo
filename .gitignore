@@ -4,3 +4,5 @@ wandb
 main.py
 sweep_config.yaml
 NOTES.md
+checkpoints
+*.mp4

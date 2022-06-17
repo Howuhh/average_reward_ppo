@@ -6,6 +6,7 @@ import torch
 import random
 
 import envpool
+import imageio
 import numpy as np
 import torch.nn as nn
 
@@ -40,7 +41,8 @@ def make_vec_env_gym(
         env_name: str,
         num_envs: int = 4,
         normalize_reward: bool = False,
-        seed: float = 42
+        seed: float = 42,
+        time_limit: Optional[int] = None
 ):
     def make_env():
         env = gym.make(env_name)
@@ -48,6 +50,9 @@ def make_vec_env_gym(
         if normalize_reward:
             env = gym.wrappers.NormalizeReward(env, gamma=1.0)
             env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
+            if time_limit is not None:
+                env = gym.wrappers.TimeLimit(env, max_episode_steps=time_limit)
+
         env = gym.wrappers.ClipAction(env)
         return env
 
@@ -89,8 +94,9 @@ class RunningMeanStd(nn.Module):
     def __init__(self, epsilon=1e-4, shape=()):
         super().__init__()
         """Tracks the mean, variance and count of values."""
-        self.mean = torch.zeros(shape, dtype=torch.float, requires_grad=False)
-        self.var = torch.ones(shape, dtype=torch.float, requires_grad=False)
+        # should be a buffer to be included into agent state dict
+        self.register_buffer("mean", torch.zeros(shape, dtype=torch.float))
+        self.register_buffer("var", torch.ones(shape, dtype=torch.float))
         self.count = epsilon
 
     def update(self, x):
@@ -128,17 +134,30 @@ class RunningMeanStd(nn.Module):
         return new_mean, new_var, new_count
 
 
-def rollout(env, agent, greedy: bool = False, device: str = "cpu"):
-    total_reward, total_steps = 0.0, 0.0
+@torch.no_grad()
+def rollout(
+        env,  # for now this should be vec_env with 1 env :)
+        agent,
+        greedy: bool = False,
+        device: str = "cpu",
+        render_path: Optional[str] = None
+):
+    total_reward, total_steps, frames = 0.0, 0.0, []
+
     state, done = env.reset(), [False]
     while not done[0]:
         state = torch.tensor(state, dtype=torch.float, device=device).reshape(1, -1)
 
         action, _ = agent.get_action(state, greedy=greedy)
         state, reward, done, info = env.step(action.cpu().numpy().reshape(1, -1))
+        if render_path is not None:
+            frames.append(env.render(mode="rgb_array"))
 
         total_reward += reward[0]
         total_steps += 1
+
+    if render_path is not None:
+        imageio.mimsave(render_path, frames, fps=32)
 
     return total_reward, total_steps
 

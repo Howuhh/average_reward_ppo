@@ -1,3 +1,4 @@
+import os
 import wandb
 import numpy as np
 
@@ -5,6 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from uuid import uuid4
+from typing import Optional
 from tqdm.auto import tqdm, trange
 
 from ppo.utils import make_vec_env_envpool, make_vec_env_gym, set_seed, rollout
@@ -32,11 +35,11 @@ class PPOTrainer:
             adam_eps: float = 1e-5, 
             clip_grad: float = 0.5,
             target_kl: float = None,
-            device: str = "cpu"
+            device: str = "cpu",
+            checkpoints_path: Optional[str] = None
     ):
-        # Make it as factory
-        self.train_env_f = lambda seed: make_vec_env_gym(env_name, num_envs, normalize_reward=True, seed=seed)
-        self.eval_env_f = lambda seed: make_vec_env_gym(env_name, num_envs=1, seed=seed)
+        self.train_env_f = lambda seed: make_vec_env_envpool(env_name, num_envs, normalize_reward=True, seed=seed)
+        self.eval_env_f = lambda seed: make_vec_env_envpool(env_name, num_envs=1, seed=seed)
 
         self.learning_rate = learning_rate
         self.decay_lr = linear_decay_lr
@@ -59,9 +62,8 @@ class PPOTrainer:
         self.target_kl = target_kl
 
         self.device = device
-
-        self._reward_rate = 0.0
-        self._value_rate = 0.0
+        self.checkpoints_path = checkpoints_path
+        self._reset_rates()
 
     def _reset_rates(self):
         self._reward_rate = 0.0
@@ -148,9 +150,9 @@ class PPOTrainer:
             if not kl_div_check:
                 break
 
+        total_updates = epoch * (len(total_idxs) // self.batch_size)
         if self.decay_lr:
             scheduler.step()
-        total_updates = epoch * (len(total_idxs) // self.batch_size)
 
         return {
             "actor_loss_epoch": actor_loss_epoch / total_updates,
@@ -174,6 +176,10 @@ class PPOTrainer:
 
     def train(self, agent, total_steps, eval_every=10, num_evals=10, seed=42, eval_seed=42, logger=None):
         self._reset_rates()
+        if self.checkpoints_path is not None:
+            run_name = f"{self.checkpoints_path}/{str(uuid4())}"
+            os.makedirs(run_name, exist_ok=True)
+            print(f"Saving checkpoint to: {run_name}")
 
         train_env = self.train_env_f(seed=seed)
         set_seed(seed)
@@ -216,12 +222,10 @@ class PPOTrainer:
                     dones[step] = torch.tensor(done, device=device)
 
                     # correct handling of timeouts, as they are not real dones and we should still bootstrap
-                    for env_id, done_ in enumerate(done):
-                        # if done_ and info["TimeLimit.truncated"][env_id]:
-                        if done_ and info[env_id].get("TimeLimit.truncated", False):
-                            # terminal_state = torch.tensor(next_state[env_id], dtype=torch.float, device=device)
-                            terminal_state = torch.tensor(info[env_id]["terminal_observation"], dtype=torch.float, device=device)
-                            terminal_bonus[step, env_id] = agent.get_value(terminal_state).item()
+                    # for env_id, done_ in enumerate(done):
+                    #     if done_ and info[env_id].get("TimeLimit.truncated", False):
+                    #         terminal_state = torch.tensor(info[env_id]["terminal_observation"], dtype=torch.float, device=device)
+                    #         terminal_bonus[step, env_id] = agent.get_value(terminal_state).item()
 
                     state = torch.tensor(next_state, dtype=torch.float, device=device)
             else:
@@ -279,6 +283,9 @@ class PPOTrainer:
                     f"KL div: {update_info['kl_div_epoch']:.3f} "
                     f"MEAN REWARD: {np.mean(eval_returns):.3f} "
                 )
+
+                if self.checkpoints_path is not None:
+                    torch.save(agent.state_dict(), os.path.join(run_name, f"agent_{update}.pt"))
 
         if logger is not None:
             logger.finish()

@@ -11,6 +11,7 @@ TBD
     journal={International Joint Conferences on Artificial Intelligence},
     pages={2797--2803},
     year={2021}
+}
 ```
 
 Also, [original implementation](https://github.com/xtma/apo) from the authors.
