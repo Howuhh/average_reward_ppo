@@ -1,6 +1,6 @@
 # Average-Reward PPO
 
-TBD
+**WARN**: this will be transfered to CleanRL library in the future, so work here is frozen for now (it works tho). I am planning to rewrite it to Jax + Brax in the future and add PPG for average reward variant. But after CleanRL integration.
 
 # References
 
